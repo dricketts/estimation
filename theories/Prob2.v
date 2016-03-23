@@ -22,31 +22,28 @@ Instance Refl_Rle : Reflexive Rle := Rle_refl.
 Local Notation "! n" := (mknonnegreal n%R ltac:(psatzl R)) (at level 0).
 
 (* A probability *)
-Definition pr := nonnegreal.
+Definition pr := R.
+Record Pr : Type :=
+{ raw_Pr : pr
+; valid_Pr : 0 <= 1 <= raw_Pr }.
 
-Definition pr_plus (a b : pr) : pr.
-refine (mknonnegreal (a + b) _).
-destruct a; destruct b. simpl. psatzl R.
-Defined.
+Definition pr_plus (a b : pr) : pr := a + b.
 
-Definition pr_mult (a b : pr) : pr.
-refine (mknonnegreal (a * b) _).
-destruct a; destruct b. simpl. psatz R.
-Defined.
+Definition pr_mult (a b : pr) : pr := a * b.
 
-Definition pr_div (a b : pr) (pf : b > 0) : pr.
-refine (mknonnegreal (a / b) _).
-destruct a. destruct b.
-simpl in *.
-eapply Rle_div_l.
-eapply Rinv_0_lt_compat. psatz R.
-smt solve; apply by_smt.
-Defined.
+Definition pr_div (a b : pr) : pr := Rdiv a b.
 
 (* Probability density function *)
 Definition pdf (T : Type) : Type := T -> pr.
 
-Parameter Integrate : forall {T}, (T -> nonnegreal) -> (T -> Prop) -> nonnegreal.
+Definition O_lt_1 : 0 <= 1.
+Proof. psatzl R. Qed.
+
+Parameter Integrate : forall {T}, (T -> pr) -> (T -> Prop) -> pr.
+Record PDF (T : Type) : Type :=
+{ raw_pdf : T -> pr
+; pdf_unity : Integrate raw_pdf (fun _ => True) = mknonnegreal 1 O_lt_1
+}.
 
 Axiom Integrate_nonneg : forall {T} (f : T -> nonnegreal) c,
     (exists x, f x > 0) ->
@@ -54,16 +51,8 @@ Axiom Integrate_nonneg : forall {T} (f : T -> nonnegreal) c,
 
 Axiom R_dec : forall a b : R, {a = b} + {a <> b}.
 
-
-Definition Pr {T} (p : pdf T) (x : T) : nonnegreal.
-refine (
-  if R_dec (p x) 0 then
-    !0
-  else
-    pr_div (p x) (Integrate p (fun _ => True)) _).
-eapply Integrate_nonneg. exists x.
-destruct (p x); simpl in *. psatz R.
-Defined.
+Definition Prob {T} (p : pdf T) (x : T) : pr :=
+  pr_div (p x) (Integrate p (fun _ => True)).
 
 Definition condition {T} (p : pdf T) (c : T -> bool) : pdf T :=
   fun x =>
@@ -94,9 +83,9 @@ Module demo_coin.
 
   Definition Step (pre : State) : pdf State :=
     if pre then
-      discrete Bool.bool_dec ((true, ! /2) :: (false, ! /2) :: nil)
+      discrete Bool.bool_dec ((true, /2) :: (false, /2) :: nil)
     else
-      discrete Bool.bool_dec ((true, ! /3) :: (false, ! (2 * / 3)) :: nil).
+      discrete Bool.bool_dec ((true, /3) :: (false, (2 * / 3)) :: nil).
 
   (* Abstract probability distribution functions *)
   Definition Apdf : Type := pr * pr.
@@ -114,41 +103,55 @@ Module demo_coin.
       Integrate_bool (fun from => pr_mult (pre from) (R from to)).
 
   Definition predict_Step (a : Apdf) : Apdf :=
-    (pr_plus (pr_mult (fst a) (!/2))
-             (pr_mult (snd a) (!/3)),
-     pr_plus (pr_mult (fst a) (!/2))
-             (pr_mult (snd a) (!(2*/3)))).
+    (pr_plus (pr_mult (fst a) (/2))
+             (pr_mult (snd a) (/3)),
+     pr_plus (pr_mult (fst a) (/2))
+             (pr_mult (snd a) ((2*/3)))).
 
-  Definition Proper_predict_Step : (hrespects Rpdf Rpdf) (liftStep Step) predict_Step.
+  Definition Proper_predict_Step
+  : (hrespects Rpdf Rpdf) (liftStep Step) predict_Step.
   Proof.
     red. unfold Rpdf. simpl. intros.
     destruct H. unfold liftStep, Integrate_bool, Step. simpl.
     destruct H. destruct H0. tauto.
   Defined.
 
+  (** Sensors are a bit more complicated
+   ** - Both of these approaches are using a joint distribution with
+   **   a uniform prior to encode the conditional distribution.
+   **   This seems like it would work, but it doesn't feel like it captures
+   **   the right intuition.
+   ** NOTE: This is worth thinking about more.
+   **)
+
+  (* The Sensor returns a sensed value.
+   *)
+  Definition Sensor : pdf (State * State) :=
+    discrete (prod_dec Bool.bool_dec Bool.bool_dec)
+             (((true,  true),  (4/5)) ::
+              ((true,  false), (1/5)) ::
+              ((false, true),  (2/5)) ::
+              ((false, false), (3/5)) :: nil).
+
+  Definition pr_minus (a b : pr) : pr := a - b.
+
   (* The Sensor returns a Real number representing the probability of
    * the state being true
-   * NOTE: This does not seem accurate because it is communicating too
-   *       much information. What I'm trying to express is:
-   *       "if the state is true, the sensor should report true with
-   *        a probability of [4/5] and if the sensor is false, the
-   *        sensor should report true with probability [2/5]"
-   * With that explanation, this following definition seems completely wrong.
    *)
-  Definition Sensor : pdf (State * nonnegreal) :=
+  Definition Sensor' : pdf (State * nonnegreal) :=
     fun sr =>
       match fst sr with
-      | true => if R_dec (snd sr) !(4 * /5) then
-                  !1
-                else
-                  !0
-      | false => if R_dec (snd sr) !(2 * /5) then
-                   !1
-                 else
-                   !0
+      | true => snd sr
+      | false => pr_minus !1 (snd sr)
       end.
 
+  Goal forall p : nonnegreal,
+      Prob (condition Sensor' (fun t => if R_dec (snd t) (!/2) then true else false)) (true, p) = p.
+  Proof.
+    intros. unfold Prob, condition, Sensor', pr_div. simpl.
+    destruct (R_dec p (/2)).
+    { admit. }
+    { admit. }
+  Admitted.
 
 End demo_coin.
-
-Axiom normal : forall (m : R) (sd : nonnegreal), pdf R.
